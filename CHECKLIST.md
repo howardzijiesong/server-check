@@ -64,17 +64,16 @@ Tick items as you go. "Audit" means the item is reported by `pve-audit.sh` or `S
 - [ ] Third-party EDR / ThreatLocker filters reviewed (`fltmc filters` in the audit)
 - [ ] `SmallFile-Test.ps1 -DefenderAB` result recorded (evidence for or against exclusions)
 
-## OpenVPN (the remote-user pain point)
-- [ ] Where it runs noted (firewall appliance / LXC / VM / host) and its version (2.6+ for DCO)
-- [ ] `proto udp` (TCP only as a fallback instance)
-- [ ] Data channel offload active: AEAD cipher (AES-GCM / ChaCha20-Poly1305), `topology subnet`, no compression, no `fragment`
-- [ ] LXC on Proxmox: DCO module available on the host kernel
-- [ ] CPU of the VPN endpoint exposes AES-NI; the OpenVPN process is not pegged at 100%
-- [ ] `mssfix` set if Client-NetCheck finds a path MTU below 1500 or a black hole
-- [ ] Pushes the DC as DNS + the AD domain suffix; remote PCs get Kerberos tickets
+## VPN - UniFi gateway, OpenVPN over UDP (the remote-user pain point)
+- [ ] Gateway model + UniFi Network version noted (OpenVPN performance depends on the gateway CPU)
+- [ ] One user's exported `.ovpn` checked: `openvpn-check.sh --unifi <file>`
+- [ ] OpenVPN server DNS setting = the DC (remote PCs get Kerberos tickets; Client-NetCheck confirms)
+- [ ] IPS / threat inspection and Smart Queues settings reviewed; office upload speed recorded
+- [ ] Client-NetCheck over the VPN: loss, jitter, path MTU / black hole
+- [ ] Black hole found? Add `mssfix 1360` to the client profiles
+- [ ] WireGuard A/B: server created on the gateway (runs alongside OpenVPN); laptop tested with `-Label vpn-client-wg`
+- [ ] Decision noted: stay on OpenVPN / move the 3-5 users to WireGuard (per-device configs, revoke on loss)
 - [ ] Split tunnel (office routes only) unless policy requires full tunnel
-- [ ] Office upload bandwidth and a typical remote user's latency recorded
-- [ ] Windows clients use the DCO adapter rather than legacy TAP-Windows (Client-NetCheck)
 
 ## Clients (Windows 11)
 - [ ] Build noted (24H2+ = signing required)

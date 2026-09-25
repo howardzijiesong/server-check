@@ -190,7 +190,13 @@ if (($loss -and $loss -gt 0.5) -or (HasWarn '% packet loss to the server')) { Ac
 $retr = MetricV 'perf/client*' 'tcp_retransmit_pct'
 if ($retr -and $retr -gt 2) { Act 1 'High TCP retransmits on the client: loss or MTU problems on the path' ("{0}% retransmits" -f (Fmt $retr 1)) '30 min' }
 if (HasWarn 'proto tcp') { Act 2 'Switch OpenVPN to proto udp (keep TCP 443 only as a fallback profile)' (WarnText 'proto tcp') '30 min' }
-if (HasWarn 'disables DCO|topology is|CBC|legacy OpenVPN TAP|older than 2\.6|disable-dco') { Act 2 'Enable OpenVPN data channel offload: 2.6+ both ends, AES-GCM/ChaCha20, topology subnet, no compression' (WarnText 'disables DCO|topology is|CBC|legacy OpenVPN TAP|older than 2\.6|disable-dco') '1 h' }
+$isUnifi = [bool](@($Facts | Where-Object { $_.key -eq 'unifi_gateway' }).Count)
+if ($isUnifi) {
+    $wgNote = 'Ubiquiti recommends WireGuard/Teleport over OpenVPN for laptops; both can run side by side'
+    $vw = LadderVal 'vpn-client-wg'
+    if ($vVpn -and $vw) { $wgNote = ("A/B: {0} ms/file over OpenVPN vs {1} ms/file over WireGuard" -f (Fmt $vVpn 1), (Fmt $vw 1)) }
+    Act 2 'UniFi gateway: move the 3-5 remote users from OpenVPN to the built-in WireGuard server (per-device configs; revoke lost devices)' $wgNote '1 h'
+} elseif (HasWarn 'disables DCO|topology is|CBC|legacy OpenVPN TAP|older than 2\.6|disable-dco') { Act 2 'Enable OpenVPN data channel offload: 2.6+ both ends, AES-GCM/ChaCha20, topology subnet, no compression' (WarnText 'disables DCO|topology is|CBC|legacy OpenVPN TAP|older than 2\.6|disable-dco') '1 h' }
 if (HasWarn 'No Kerberos ticket|mapped by IP|Cannot resolve|dhcp-option DNS') { Act 2 'Fix name resolution over the VPN: push the DC as DNS + domain suffix; map drives by server name' (WarnText 'No Kerberos ticket|mapped by IP|Cannot resolve|dhcp-option DNS') '30 min' }
 if (HasWarn 'vmgenid is NOT set') { Act 2 'Add vmgenid to the DC VM before relying on snapshot rollback (qm set <vmid> --vmgenid 1)' 'AD rollback protection' '5 min + stop/start' }
 if (HasWarn 'discard not enabled|TRIM is disabled') { Act 2 'Enable discard=on (and ssd=1) on the VM disks, then Optimize-Volume -ReTrim in Windows' (WarnText 'discard not enabled|TRIM is disabled') '10 min + reboot' }
@@ -262,6 +268,8 @@ if ($ladder.Count -gt 0) {
     L ''
     Table $ladder @('Label', 'ReadMsPerFile', 'OpenCloseMs', 'StatMs', 'CreateMs', 'CommitMs', 'RoundTrips', 'SecPer1000Files')
     if ($vLocal -and $vAv) { L ("Antivirus A/B on the server: {0} ms/file with Defender scanning vs {1} ms/file with a temporary exclusion." -f (Fmt $vLocal 3), (Fmt $vAv 3)); L '' }
+    $wgV = LadderVal 'vpn-client-wg'
+    if ($vVpn -and $wgV) { L ("VPN protocol A/B: OpenVPN {0} ms/file vs WireGuard {1} ms/file ({2}% difference). Either way, remote time stays dominated by internet round trips." -f (Fmt $vVpn 1), (Fmt $wgV 1), (Fmt (100 * ($vVpn - $wgV) / $vVpn) 0)); L '' }
     $hddV = LadderVal 'vpn-client-hdd'
     if ($vVpn -and $hddV) { L ("Same VPN test against the old HDD share: {0} ms/file vs {1} ms/file on the NVMe/ZFS share - the storage medium barely matters over the VPN." -f (Fmt $hddV 1), (Fmt $vVpn 1)); L '' }
 }

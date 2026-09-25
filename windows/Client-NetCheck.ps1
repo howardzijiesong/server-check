@@ -128,7 +128,7 @@ try {
 } catch { Write-Host "Find-NetRoute failed: $($_.Exception.Message)" }
 if (-not $script:NcLabel) {
     $script:NcLabel = 'lan'
-    if ("$routeAdapter $($rt.InterfaceAlias)" -match 'WireGuard|Wintun|TAP-Windows|OpenVPN|Data Channel Offload|Fortinet|FortiClient|SonicWall|PANGP|GlobalProtect|AnyConnect|WatchGuard|Tailscale|ZeroTier|Zscaler|PPP|VPN') { $script:NcLabel = 'vpn' }
+    if ("$routeAdapter $($rt.InterfaceAlias)" -match 'WireGuard|Wintun|TAP-Windows|OpenVPN|Data Channel Offload|WiFiman|Teleport|Fortinet|FortiClient|SonicWall|PANGP|GlobalProtect|AnyConnect|WatchGuard|Tailscale|ZeroTier|Zscaler|PPP|VPN') { $script:NcLabel = 'vpn' }
     Write-Host "Location label (auto): $($script:NcLabel)   (override with -Label)"
 }
 NcFact server $Server; NcFact server_ip $ip; NcFact route_adapter $routeAdapter; NcFact if_mtu $ifMtu; NcFact os_build $os.BuildNumber
@@ -234,7 +234,7 @@ if ($av3.Count -gt 0) { Show ($av3 | Select-Object Status, Name, DisplayName) }
 Section 'NETWORK ADAPTERS (VPN adapters included)'
 $ads = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
 Show ($ads | Select-Object Name, InterfaceDescription, Status, LinkSpeed, @{ n = 'MTU'; e = { (Get-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).NlMtu } })
-$vpnRegex = 'WireGuard|Wintun|TAP-Windows|OpenVPN|Data Channel Offload|Fortinet|FortiClient|SonicWall|PANGP|GlobalProtect|AnyConnect|Cisco Secure|WatchGuard|Sophos|Tailscale|ZeroTier|Check Point|Zscaler'
+$vpnRegex = 'WireGuard|Wintun|TAP-Windows|OpenVPN|Data Channel Offload|WiFiman|Teleport|Fortinet|FortiClient|SonicWall|PANGP|GlobalProtect|AnyConnect|Cisco Secure|WatchGuard|Sophos|Tailscale|ZeroTier|Check Point|Zscaler'
 $vpn = @($ads | Where-Object { $_.InterfaceDescription -match $vpnRegex -or $_.Name -match $vpnRegex })
 if ($vpn.Count -gt 0) { Write-Host ("VPN adapter(s) detected: {0}" -f (($vpn | ForEach-Object { $_.InterfaceDescription }) -join '; ')) }
 $ovpnGui = Get-ItemProperty 'HKLM:\SOFTWARE\OpenVPN' -ErrorAction SilentlyContinue

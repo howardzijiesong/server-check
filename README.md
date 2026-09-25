@@ -7,7 +7,7 @@ Scripts to find out **where the time goes** when CaseWare Working Papers and Tax
 - **FastPool:** a ZFS mirror of 2x Kioxia CD6 NVMe. It holds the Windows VM and 4 rarely used VMs.
 - **StoragePool:** HDD backup target, replicated with syncoid nightly at 04:00 (30 daily / 8 weekly / 6 monthly / 8 yearly retention, a compliance requirement).
 - **Windows VM:** a single Windows Server 2025 VM that is both the **domain controller and the file server**. Its data is on ZFS thin zvols formatted NTFS. An old NTFS HDD is also attached directly to the VM, with no ZFS.
-- **Clients:** Windows 11. 3-5 remote users connect from their own computers over OpenVPN (Fortinet until last week). SmartSync is ruled out.
+- **Clients:** Windows 11. 3-5 remote users connect from their own computers over **OpenVPN (UDP) running on the UniFi gateway** (Fortinet until last week). SmartSync is ruled out.
 - **Power:** consumer UPS for now; an enterprise UPS is planned.
 
 > Remote access was slow under **every** setup, including the old bare-metal server and the Fortinet VPN. That points at the architecture (small-file SMB over the internet), not at one VPN product or one storage layout. The kit measures this directly.
@@ -27,7 +27,7 @@ Scripts to find out **where the time goes** when CaseWare Working Papers and Tax
 | `windows/SmallFile-Test.ps1 -Path <local/UNC> -Label <layer>` | Server + clients | The same small-file workload at every layer; optional Defender A/B | Only under `_smallfile_bench\` |
 | `windows/Client-NetCheck.ps1 -Server <name> -Share <share>` | Clients (non-admin) | Latency, loss, MTU black hole, OpenVPN adapter, SMB signing, Kerberos | No |
 | `windows/Perf-Monitor.ps1 -Role Server\|Client -Label lan\|vpn` | Server + a client (admin) | Performance counters during real use, with verdicts | Temporary logman collector |
-| `vpn/openvpn-check.sh [configs]` | OpenVPN server (Linux / pfSense / OPNsense) | TCP mode, compression, CBC, DCO, MTU, DNS push, full tunnel | No |
+| `vpn/openvpn-check.sh --unifi <client.ovpn>` | Any Linux/macOS/WSL (your Arch box), or the gateway over SSH | Checks the profile exported from the UniFi Network app: TCP/UDP, cipher, MTU/mssfix, compression; UniFi-specific advice | No |
 | `Analyze-Results.ps1 -Path <folders> [-Redact]` | Your laptop / any PowerShell | **Reads every log and writes the summary + next steps** | Writes `analysis-summary-*.md` |
 
 Shared libraries: `proxmox/kit-common.sh` and `windows/lib/KitCommon.ps1`. **Always copy whole folders**, never single scripts.
@@ -87,7 +87,7 @@ zfs list -t snapshot -o name,creation -s creation -r StoragePool | tail
 - The VM is the DC, so make sure `vmgenid` is set (pve-audit checks this).
 
 ### Step 1 - Audits (read-only, anytime)
-`./pve-audit.sh <vmid>` · `.\Server-Audit.ps1 -DataPath D:\<data>` · `./openvpn-check.sh` (on the VPN box, plus a client .ovpn)
+`./pve-audit.sh <vmid>` · `.\Server-Audit.ps1 -DataPath D:\<data>` · `./openvpn-check.sh --unifi <a user's .ovpn>`, run on your laptop. Optionally, with SSH enabled on the gateway, run it there with no arguments; it finds the running server config by itself.
 
 ### Step 2 - Benchmarks (users off)
 | What | Command |
@@ -100,6 +100,7 @@ zfs list -t snapshot -o name,creation -s creation -r StoragePool | tail
 | server-loopback | `.\SmallFile-Test.ps1 -Path \\<server>\Share -Label server-loopback` |
 | lan-client (office PC) | `.\SmallFile-Test.ps1 -Path \\<server>\Share -Label lan-client -Mode ReadSeed` |
 | vpn-client (laptop on hotspot + OpenVPN) | `.\SmallFile-Test.ps1 -Path \\<server>\Share -Label vpn-client -Mode ReadSeed -RealDataPath \\<server>\Share\<engagement>` |
+| vpn-client-wg (same laptop, UniFi WireGuard) | same command with `-Label vpn-client-wg` (see 6C) |
 | Network, both locations | `.\Client-NetCheck.ps1 -Server <server> -Share <share>` |
 
 ### Step 3 - Same-media "ZFS vs no ZFS" test with the SSD you bring
@@ -160,13 +161,27 @@ Rules of thumb:
 - `fsutil 8dot3name set D: 1`, then `fsutil behavior set disablelastaccess 1`.
 - ABE off if not needed; shadow copies outside business hours; `Optimize-Volume -ReTrim`.
 
-**C. OpenVPN (3-5 users).**
-- `proto udp`.
-- DCO: 2.6+ on both ends, AES-GCM / ChaCha20-Poly1305, `topology subnet`, no compression, no `fragment`.
-- `mssfix` if an MTU problem shows up.
-- Push the DC as DNS plus the domain suffix; split tunnel.
+**C. VPN on the UniFi gateway (3-5 users).**
 
-These fix hangs and throughput, not round-trip time.
+UDP is confirmed, so TCP-over-TCP stalls are ruled out. The OpenVPN server is managed by the UniFi Network app, so cipher and DCO tuning isn't available there; hand edits on the gateway get overwritten. What you *can* do:
+
+1. **A/B test WireGuard on Sunday without disturbing anyone.**
+   - UniFi runs WireGuard alongside OpenVPN. Create a WireGuard server (default UDP 51820) and one client config for your laptop.
+   - Run SmallFile-Test / Client-NetCheck with `-Label vpn-client-wg`, and compare with `vpn-client` (OpenVPN) in the analyzer.
+   - Ubiquiti itself recommends Teleport/WireGuard over OpenVPN for desktops and laptops.
+2. **MTU black hole:** if Client-NetCheck finds one, add `mssfix 1360` to the users' `.ovpn` profiles. This is client-side, so the managed server doesn't matter. WireGuard avoids most of this with its smaller default MTU.
+3. **In the Network app:**
+   - The VPN server's DNS points at the DC, so AD names and Kerberos work.
+   - Review IPS/threat inspection and Smart Queues on the WAN.
+   - Check the office upload speed.
+   - Note the gateway model: OpenVPN is CPU-bound on smaller gateways.
+
+WireGuard vs OpenVPN trade-offs:
+- WireGuard is faster and simpler, with a kernel data path.
+- It uses per-device key files: a lost laptop keeps access until you revoke its config, and there is no password/MFA prompt.
+- Moving means installing the WireGuard client and one config per user.
+
+Either way this fixes the tunnel, not round-trip time.
 
 **D. Storage (only if real-use disk latency is high).**
 - New zvol with the best volblocksize from pve-bench: add it as a new disk, then `robocopy /MIR /COPYALL /DCOPY:DAT`, then swap letters and shares.
@@ -193,7 +208,7 @@ Over any VPN, each small file costs several internet round trips. The fix that w
 | Option | Gains | Costs / risks |
 |---|---|---|
 | **Remote Desktop Session Host VM** (separate from the DC) | Near-office speed for CaseWare + TaxCycle. Client data stays on the server instead of being pulled onto personal PCs. One place to patch. Easily sized on this host | RDS CALs for 3-5 users. Windows Server licensing for the extra VM (verify core licensing with your reseller). Printer/scanner redirection quirks. Confirm both vendors' terminal-server licensing. 120-day grace period for a pilot |
-| Tune OpenVPN only | Fixes hangs, loss, MTU | Still round-trip-bound: slow |
+| Switch to UniFi WireGuard (or fix MTU on OpenVPN) | Better tunnel: throughput, stability, fewer MTU stalls | Still round-trip-bound for small-file SMB: slow. Ideal as the transport for RDP |
 | CaseWare Cloud | No VPN for CaseWare | Subscription; CaseWare only |
 
 ### DC and file server on one VM

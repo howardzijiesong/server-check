@@ -7,8 +7,10 @@
 # READ-ONLY. Run it where the OpenVPN SERVER runs; optionally pass a client
 # .ovpn profile too.
 #
-# Usage:  ./openvpn-check.sh                    # auto-find server configs
+# Usage:  ./openvpn-check.sh                    # auto-find server configs (also from running processes)
 #         ./openvpn-check.sh /path/server.conf  /path/client.ovpn
+#         ./openvpn-check.sh --unifi client.ovpn   # profile exported from a UniFi gateway, checked
+#                                                  # on any Linux/macOS/WSL machine (no SSH needed)
 # OpenVPN Access Server keeps its config in a database: use its Admin UI
 # (VPN Settings / Advanced / Data Channel Offload) and check the same items.
 # =============================================================================
@@ -38,6 +40,13 @@ warn() { printf '  [WARN] %s\n' "$*"; WARN=$((WARN + 1)); rec WARN "" "$*"; }
 info() { printf '  [INFO] %s\n' "$*"; rec INFO "" "$*"; }
 ok()   { printf '  [ OK ] %s\n' "$*"; rec OK "" "$*"; }
 fact() { rec FACT "$1" "" "$2"; }
+
+UNIFI=0
+if [ "${1:-}" = "--unifi" ]; then UNIFI=1; shift; fi
+if command -v ubnt-device-info >/dev/null 2>&1 || [ -e /proc/ubnthal/system.info ]; then UNIFI=1; fi
+# tune: settings that matter on self-managed OpenVPN; on UniFi the server side is managed by the
+# Network app (hand edits are overwritten), so they become information + the WireGuard advice
+tune() { if [ "$UNIFI" = 1 ]; then info "$* (UniFi manages the server side - not adjustable there; see the WireGuard note at the end)"; else warn "$*"; fi; }
 # value of a directive (first match, comments stripped)
 dv()   { sed -e 's/[#;].*$//' "$2" | awk -v k="$1" '$1==k { $1=""; sub(/^ +/, ""); print; exit }'; }
 has()  { sed -e 's/[#;].*$//' "$2" | grep -Eq "^[[:space:]]*$1([[:space:]]|\$)"; }
@@ -66,7 +75,7 @@ check_file() {
 
   topo=$(dv topology "$f")
   if [ "$role" = "server" ] && [ "$topo" != "subnet" ]; then
-    warn "topology is '${topo:-net30 (default)}': data channel offload (DCO) requires topology subnet."
+    tune "topology is '${topo:-net30 (default)}': data channel offload (DCO) requires topology subnet."
   fi
 
   if has comp-lzo "$f" || has compress "$f"; then
@@ -80,13 +89,16 @@ check_file() {
   ciph=$(dv cipher "$f"); dcs=$(dv data-ciphers "$f"); [ -z "$dcs" ] && dcs=$(dv ncp-ciphers "$f")
   say "  cipher: ${ciph:-unset}   data-ciphers: ${dcs:-default}"
   fact "$role.cipher" "${ciph:-unset} / ${dcs:-default}"
-  case "$ciph" in *CBC*|BF-*|*bf-*) [ -z "$dcs" ] && warn "cipher $ciph without data-ciphers: CBC/Blowfish is slow and cannot use DCO (DCO needs AES-GCM or ChaCha20-Poly1305)." ;; esac
+  case "$ciph" in *CBC*|BF-*|*bf-*) [ -z "$dcs" ] && tune "cipher $ciph without data-ciphers: CBC/Blowfish is slow and cannot use DCO (DCO needs AES-GCM or ChaCha20-Poly1305)." ;; esac
   case "$dcs" in *CBC*) info "data-ciphers still lists a CBC cipher; fine as a fallback for old clients, but make sure clients negotiate AES-GCM." ;; esac
 
   if has fragment "$f"; then warn "'fragment' is set: extra per-packet overhead and incompatible with DCO. Use mssfix instead."; fi
   ms=$(dv mssfix "$f"); tm=$(dv tun-mtu "$f")
   say "  tun-mtu: ${tm:-default 1500}   mssfix: ${ms:-default}"
-  [ -z "$ms" ] && info "mssfix not set explicitly. If Client-NetCheck.ps1 reports a path MTU below 1500 or a black hole, set e.g. 'mssfix 1360' (server; also push it or put it in client profiles)."
+  if [ -z "$ms" ]; then
+    if [ "$role" = "client" ]; then info "mssfix not set in this client profile. If Client-NetCheck.ps1 finds a path-MTU black hole, add the line 'mssfix 1360' to the profile: it clamps the TCP connections the PC opens (SMB, RDP) and works even when the server side is managed (UniFi)."
+    else info "mssfix not set explicitly. If Client-NetCheck.ps1 reports a path MTU below 1500 or a black hole, set e.g. 'mssfix 1360' (server; also push it or put it in client profiles)."; fi
+  fi
   if has disable-dco "$f"; then warn "'disable-dco' is set: the data channel runs in userspace (single-threaded, slower)."; fi
 
   sb=$(dv sndbuf "$f"); rb=$(dv rcvbuf "$f")
@@ -141,6 +153,12 @@ ps ax -o pid,pcpu,rss,args 2>/dev/null | awk 'NR==1 || /[o]penvpn/' | cut -c1-16
 # ---------------------------------------------------------------- configs
 FILES="$*"
 if [ -z "$FILES" ]; then
+  # configs of running openvpn processes - works on appliances with unknown paths (e.g. UniFi OS)
+  for p in $(ps ax -o args 2>/dev/null | awk '/[o]penvpn/ { cd = ""; for (i = 1; i <= NF; i++) { if ($i == "--cd") cd = $(i + 1); if ($i == "--config") { c = $(i + 1); if (c !~ /^\// && cd != "") c = cd "/" c; print c } } }'); do
+    [ -f "$p" ] && FILES="$FILES $p"
+  done
+fi
+if [ -z "$FILES" ]; then
   for p in /etc/openvpn/server/*.conf /etc/openvpn/*.conf /etc/openvpn/client/*.conf \
            /var/etc/openvpn/*/config.ovpn /var/etc/openvpn/*.conf /usr/local/etc/openvpn/*.conf; do
     [ -f "$p" ] && FILES="$FILES $p"
@@ -153,6 +171,15 @@ else
   for f in $FILES; do [ -r "$f" ] && check_file "$f"; done
 fi
 
+if [ "$UNIFI" = 1 ]; then
+  fact unifi_gateway 1
+  command -v ubnt-device-info >/dev/null 2>&1 && fact unifi_model "$(ubnt-device-info model 2>/dev/null)"
+  say ""
+  say "=== UniFi gateway notes"
+  info "Ubiquiti's own guidance: OpenVPN gives lower throughput than WireGuard, and Teleport/WireGuard are recommended over OpenVPN for desktops and laptops. The gateway can run WireGuard ALONGSIDE OpenVPN, so you can A/B test on one laptop without disturbing users (SmallFile-Test -Label vpn-client-wg)."
+  info "Also check in the Network app: the VPN server's DNS points at the DC, IPS/threat inspection and Smart Queues settings on the WAN, and the office upload speed."
+  info "Neither VPN removes internet round-trip time: for CaseWare/TaxCycle, run the apps next to the data (Remote Desktop session host) and use the VPN only for RDP."
+fi
 say ""
 say "Done: $WARN warning(s). DCO needs: OpenVPN 2.6+ on BOTH ends, an AEAD cipher (AES-GCM or"
 say "ChaCha20-Poly1305), topology subnet, no compression, no 'fragment'. It speeds the tunnel up;"
