@@ -1,0 +1,11 @@
+# test output contains host names, users, IPs, share names - never commit it
+results/
+**/results/
+collected/
+analysis-summary-*.md
+*.blg
+*.jsonl
+# third-party binaries: download DiskSpd yourself
+windows/tools/*
+!windows/tools/PUT-DISKSPD-HERE.txt
+*.zip
