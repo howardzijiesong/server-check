@@ -259,6 +259,12 @@ main() {
     echo "aio: ${aio:-default (io_uring)}"
     path=$(pvesm path "$volid" 2>/dev/null)
     echo "backing path: ${path:-?}"
+    if [[ "$volid" == /dev/* ]]; then
+      info "$key is a directly attached physical disk ($volid): Proxmox cannot snapshot or back it up; it is only as fast as that drive."
+      if [[ "$volid" =~ ST[0-9]+DM00[4-9]|ST2000DM008|ST4000DM004|ST6000DM003|ST8000DM004|WD[0-9]+EFAX|WD[0-9]+EZAZ|DT02ABA|MQ04ABF ]]; then
+        warn "$key ($volid) is a known SMR (shingled) hard drive: after its cache fills, writes stall for seconds at a time. Keep active data, shadow copies, backups and anything Windows writes continuously OFF this disk - it is a classic source of intermittent hangs."
+      fi
+    fi
     if [[ "$path" == /dev/zvol/* ]]; then
       ds=${path#/dev/zvol/}
       zfs get -o property,value volblocksize,volsize,referenced,logicalreferenced,refreservation,compressratio,sync,compression,primarycache,logbias "$ds"
@@ -309,6 +315,38 @@ main() {
     fi
   done <<<"$CONF"
   grep -qE '^hostpci[0-9]+:' <<<"$CONF" && info "VM already has PCI passthrough devices (see hostpci lines)."
+  grep -qE '^virtiofs[0-9]+:' <<<"$CONF" && info "A virtiofs share is still attached to the VM (virtiofsd + WinFsp driver in Windows). If it is no longer used, remove it: uninstall the virtiofs service in Windows, then qm set $VMID --delete virtiofs0."
+
+  echo; echo "---- Host network health (LAN slowness suspects: drops, errors, offloads, firewall)"
+  for ifp in /sys/class/net/*; do
+    ifc=$(basename "$ifp")
+    [[ "$ifc" =~ ^(en|eth|bond|vmbr|tap${VMID}i) ]] || continue
+    stats=$(ip -s link show "$ifc" 2>/dev/null)
+    rxl=$(awk '/RX:/ {getline; print}' <<<"$stats" | awk '{print "rx bytes="$1" packets="$2" errors="$3" dropped="$4}')
+    txl=$(awk '/TX:/ {getline; print}' <<<"$stats" | awk '{print "tx bytes="$1" packets="$2" errors="$3" dropped="$4}')
+    echo "  $ifc: $rxl | $txl"
+    rxe=$(awk '/RX:/ {getline; print $3+$4}' <<<"$stats"); txe=$(awk '/TX:/ {getline; print $3+$4}' <<<"$stats")
+    kit_fact "nic.$ifc.rx_err_drop" "${rxe:-?}"; kit_fact "nic.$ifc.tx_err_drop" "${txe:-?}"
+    if [[ "${rxe:-0}" =~ ^[0-9]+$ && "${txe:-0}" =~ ^[0-9]+$ ]] && (( rxe + txe > 1000 )); then
+      warn "Interface $ifc shows $((rxe + txe)) errors/drops since boot. Dropped packets mean TCP retransmissions: every SMB request that hits one waits ~200 ms. Check cable/switch port, NIC driver/firmware and offload settings."
+    fi
+    if [[ -e /sys/class/net/$ifc/device ]] && have ethtool; then
+      off=$(ethtool -k "$ifc" 2>/dev/null | grep -E '^(generic-receive-offload|large-receive-offload|tcp-segmentation-offload|generic-segmentation-offload|rx-checksumming|tx-checksumming):' | awk '{printf "%s=%s ", $1, $2}')
+      echo "    offloads: $off"
+      kit_fact "nic.$ifc.offloads" "$off"
+      drv=$(ethtool -i "$ifc" 2>/dev/null | awk '/^(driver|version|firmware-version):/ {printf "%s ", $0}')
+      echo "    $drv"; kit_fact "nic.$ifc.driver" "$drv"
+      [[ "$off" == *large-receive-offload:\ on* ]] && info "$ifc has LRO enabled while bridged to VMs; LRO on a bridge uplink is a known cause of odd TCP behaviour for guests (ethtool -K $ifc lro off to test)."
+    fi
+  done
+  if have pve-firewall; then
+    fwst=$(pve-firewall status 2>/dev/null | xargs); echo "  pve-firewall: $fwst"; kit_fact pve_firewall "$fwst"
+  fi
+  if [[ -r /proc/sys/net/netfilter/nf_conntrack_count ]]; then
+    cc=$(cat /proc/sys/net/netfilter/nf_conntrack_count); cm=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
+    echo "  conntrack: $cc / $cm"; kit_fact conntrack "$cc/$cm"
+    (( cc * 100 / cm > 80 )) && warn "Connection-tracking table is ${cc}/${cm} full: new connections get dropped when it fills."
+  fi
 
   # ------------------------------------------------------ OTHER WORKLOAD
   section "OTHER GUESTS ON THIS HOST (contention)"

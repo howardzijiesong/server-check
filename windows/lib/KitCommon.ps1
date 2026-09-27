@@ -79,6 +79,7 @@ function Select-Existing($Object, [string[]]$Property) {
 }
 
 function Test-KitAdmin {
+    if ($env:KIT_FAKE_ADMIN -eq '1') { return $true }   # test hook for running the scripts on non-Windows
     try { return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
     catch { return $false }
 }

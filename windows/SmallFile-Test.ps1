@@ -41,11 +41,20 @@ param(
     [int]$RealDataMaxMB = 500,
     [switch]$DefenderAB,
     [switch]$KeepFiles,
-    [string]$OutDir = (Join-Path $PSScriptRoot 'results')
+    [string]$OutDir
 )
 
 $ErrorActionPreference = 'Continue'
-$kitLib = Join-Path $PSScriptRoot 'lib\KitCommon.ps1'
+# Where the kit lives. $PSScriptRoot is empty when the code is pasted or run with ISE "Run Selection" (F8).
+$KitRoot = $PSScriptRoot
+if (-not $KitRoot -and $MyInvocation.MyCommand.Path) { $KitRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $KitRoot) {
+    $KitRoot = (Get-Location).Path
+    Write-Host "NOTE: script location unknown (pasted, or ISE F8?) - using the current folder: $KitRoot" -ForegroundColor Yellow
+    Write-Host "      Best: cd into the kit folder and run it as a file:  powershell -ExecutionPolicy Bypass -File .\<script>.ps1 ..." -ForegroundColor Yellow
+}
+if (-not $OutDir) { $OutDir = Join-Path $KitRoot 'results' }
+$kitLib = Join-Path $KitRoot 'lib\KitCommon.ps1'
 if (-not (Test-Path -LiteralPath $kitLib)) { Write-Host "ERROR: $kitLib is missing - copy the whole 'windows' folder of the kit, not single scripts." -ForegroundColor Red; exit 2 }
 . $kitLib
 Initialize-KitLog 'SmallFile-Test' $OutDir $PSBoundParameters

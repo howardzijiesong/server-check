@@ -65,7 +65,7 @@ Tick items as you go. "Audit" means the item is reported by `pve-audit.sh` or `S
 - [ ] `SmallFile-Test.ps1 -DefenderAB` result recorded (evidence for or against exclusions)
 
 ## VPN - UniFi gateway, OpenVPN over UDP (the remote-user pain point)
-- [ ] Gateway model + UniFi Network version noted (OpenVPN performance depends on the gateway CPU)
+- [ ] UniFi Network version noted (gateway is a UDM-Beast: CPU is not the VPN limit)
 - [ ] One user's exported `.ovpn` checked: `openvpn-check.sh --unifi <file>`
 - [ ] OpenVPN server DNS setting = the DC (remote PCs get Kerberos tickets; Client-NetCheck confirms)
 - [ ] IPS / threat inspection and Smart Queues settings reviewed; office upload speed recorded

@@ -19,11 +19,20 @@ param(
     [string]$DataPath,
     [int]$EventDays = 7,
     [int]$CensusMaxFiles = 300000,
-    [string]$OutDir = (Join-Path $PSScriptRoot 'results')
+    [string]$OutDir
 )
 
 $ErrorActionPreference = 'Continue'
-$kitLib = Join-Path $PSScriptRoot 'lib\KitCommon.ps1'
+# Where the kit lives. $PSScriptRoot is empty when the code is pasted or run with ISE "Run Selection" (F8).
+$KitRoot = $PSScriptRoot
+if (-not $KitRoot -and $MyInvocation.MyCommand.Path) { $KitRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $KitRoot) {
+    $KitRoot = (Get-Location).Path
+    Write-Host "NOTE: script location unknown (pasted, or ISE F8?) - using the current folder: $KitRoot" -ForegroundColor Yellow
+    Write-Host "      Best: cd into the kit folder and run it as a file:  powershell -ExecutionPolicy Bypass -File .\<script>.ps1 ..." -ForegroundColor Yellow
+}
+if (-not $OutDir) { $OutDir = Join-Path $KitRoot 'results' }
+$kitLib = Join-Path $KitRoot 'lib\KitCommon.ps1'
 if (-not (Test-Path -LiteralPath $kitLib)) { Write-Host "ERROR: $kitLib is missing - copy the whole 'windows' folder of the kit, not single scripts." -ForegroundColor Red; exit 2 }
 . $kitLib
 Initialize-KitLog 'Server-Audit' $OutDir $PSBoundParameters
@@ -32,8 +41,9 @@ $ts = $script:KitStamp
 $report = $script:KitLog
 Start-Transcript -Path $report | Out-Null
 # any unexpected error: log it with a hint and continue with the next step (read-only audit)
+# Read-only audit: log any unexpected error with a hint and carry on with the next step.
+# (No try/finally around the body: 'continue' in a trap does not resume inside a try block.)
 trap { Write-KitError "Step failed: $($_.Exception.Message)" '' $_; continue }
-try {
 
 # ------------------------------------------------------------------ SYSTEM
 Section 'SYSTEM'
@@ -149,6 +159,18 @@ foreach ($n in $nics) {
     }
     if ([string]$n.LinkSpeed -match '^(10|100) Mbps') { Add-Finding 'WARN' "NIC '$($n.Name)' reports only $($n.LinkSpeed)." }
 }
+$tcpStats = (netstat -s -p tcp 2>$null) -join "`n"
+$sentSeg = 0; $retrSeg = 0
+if ($tcpStats -match 'Segments Sent\s*=\s*(\d+)') { $sentSeg = [double]$Matches[1] }
+if ($tcpStats -match 'Segments Retransmitted\s*=\s*(\d+)') { $retrSeg = [double]$Matches[1] }
+if ($sentSeg -gt 0) {
+    $retrPct = [math]::Round(100 * $retrSeg / $sentSeg, 2)
+    Write-Host ("TCP since boot: {0:N0} segments sent, {1:N0} retransmitted ({2}%)" -f $sentSeg, $retrSeg, $retrPct)
+    Write-KitMetric tcp_retransmit_pct_since_boot $retrPct pct
+    if ($retrPct -gt 1) { Add-Finding 'WARN' ("{0}% of TCP segments sent since boot were retransmitted. Packet loss between clients and this VM (bad cable/port, NIC offload problem, MTU mismatch) turns every affected SMB request into a ~200 ms stall - a prime suspect for LAN slowness." -f $retrPct) }
+}
+$v6 = @(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike 'fe80*' })
+if ($v6.Count -gt 0) { Write-Host ("IPv6 addresses: {0}" -f (($v6 | ForEach-Object { $_.IPAddress }) -join ', ')); Add-Finding 'INFO' 'This server has global/ULA IPv6 addresses. Windows clients prefer IPv6: if they get an AAAA record for this server but IPv6 is not routed end to end, connections start with a delay. Check that clients reach the server over the address you expect (Client-NetCheck shows the route).' }
 Write-Host 'DNS servers:'
 Show (Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses } | Select-Object InterfaceAlias, ServerAddresses)
 
@@ -224,6 +246,26 @@ if ($DataPath) {
         $big = @($dirCounts.GetEnumerator() | Where-Object { $_.Value -ge 5000 })
         if ($big.Count -gt 0) { Add-Finding 'INFO' ("{0} folder(s) hold 5,000+ files. Large flat folders are slow to list and look up over SMB (worse with 8.3 names and access-based enumeration)." -f $big.Count) }
     } else { Write-Host "DataPath '$DataPath' not found." }
+}
+
+# ------------------------------------------------------------------ AD / DNS (DC only)
+if ([int]$cs.DomainRole -ge 4) {
+    Section 'ACTIVE DIRECTORY AND DNS HEALTH'
+    $myIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '127.0.0.1' } | ForEach-Object { $_.IPAddress })
+    $dnsList = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses } | ForEach-Object { $_.ServerAddresses }) | Select-Object -Unique
+    $selfDns = @($dnsList | Where-Object { $_ -eq '127.0.0.1' -or $myIps -contains $_ }).Count -gt 0
+    Write-Host ("The DC's own DNS servers: {0}   (its addresses: {1})" -f ($dnsList -join ', '), ($myIps -join ', '))
+    Write-KitFact dc_dns_servers ($dnsList -join ', '); Write-KitFact dc_uses_itself_for_dns $selfDns
+    if (-not $selfDns) { Add-Finding 'WARN' 'The DC does not use itself for DNS. A DC must point at itself (its own IP or 127.0.0.1, ideally as the second entry) and forward external names to the UDM / ISP; otherwise AD records are not found and domain name resolution becomes unreliable.' }
+    if (Get-Command dcdiag -ErrorAction SilentlyContinue) {
+        Write-Host 'Running dcdiag /q (prints errors only; can take a minute)...'
+        $dd = @(dcdiag /q 2>&1 | ForEach-Object { "$_" } | Where-Object { $_.Trim() })
+        Write-KitMetric dcdiag_error_lines $dd.Count count
+        if ($dd.Count -gt 0) {
+            $dd | Select-Object -First 40 | ForEach-Object { Write-Host "  $_" }
+            Add-Finding 'WARN' ("dcdiag reported problems ({0} lines, see the audit log). AD/DNS health problems are the usual reason the domain name 'does not work' on clients, which pushes people to IP addresses and NTLM." -f $dd.Count)
+        } else { Write-Host 'dcdiag: no errors reported.' }
+    }
 }
 
 # ------------------------------------------------------------------ SMB SERVER
@@ -347,8 +389,6 @@ foreach ($lvl in 'WARN', 'INFO') {
 }
 if ($Findings.Count -eq 0) { Write-Host 'No findings.' }
 $Findings | Export-Csv -Path ($script:KitBase + '-findings.csv') -NoTypeInformation
-} finally {
-    Complete-KitLog
-    try { Stop-Transcript | Out-Null } catch { }
-    Write-Host "Report saved: $report"
-}
+Complete-KitLog
+try { Stop-Transcript | Out-Null } catch { }
+Write-Host "Report saved: $report"

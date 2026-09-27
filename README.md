@@ -7,7 +7,7 @@ Scripts to find out **where the time goes** when CaseWare Working Papers and Tax
 - **FastPool:** a ZFS mirror of 2x Kioxia CD6 NVMe. It holds the Windows VM and 4 rarely used VMs.
 - **StoragePool:** HDD backup target, replicated with syncoid nightly at 04:00 (30 daily / 8 weekly / 6 monthly / 8 yearly retention, a compliance requirement).
 - **Windows VM:** a single Windows Server 2025 VM that is both the **domain controller and the file server**. Its data is on ZFS thin zvols formatted NTFS. An old NTFS HDD is also attached directly to the VM, with no ZFS.
-- **Clients:** Windows 11. 3-5 remote users connect from their own computers over **OpenVPN (UDP) running on the UniFi gateway** (Fortinet until last week). SmartSync is ruled out.
+- **Clients:** Windows 11. 3-5 remote users connect from their own computers over **OpenVPN (UDP) on a UniFi Dream Machine Beast** (Fortinet until last week). SmartSync is ruled out.
 - **Power:** consumer UPS for now; an enterprise UPS is planned.
 
 > Remote access was slow under **every** setup, including the old bare-metal server and the Fortinet VPN. That points at the architecture (small-file SMB over the internet), not at one VPN product or one storage layout. The kit measures this directly.
@@ -61,6 +61,17 @@ It runs in Windows PowerShell 5.1 and in PowerShell 7 (`pwsh`) on Linux.
 
 **Use these labels so the analyzer can line the layers up:** `server-local`, `server-loopback`, `lan-client`, `vpn-client`. Optional extra labels: `hdd-native`, `ssd-native`, `ssd-zfs`, `vpn-client-hdd`.
 
+## 2b. What you can measure tonight, over RDP (no LAN client needed)
+
+The LAN gap (0.2 s on the old bare-metal box vs 12-15 s now) is the puzzle worth solving first, and half of it can be measured remotely:
+
+1. On the server: `.\Server-Audit.ps1 -DataPath D:\<data>`.
+2. On the server: `.\SmallFile-Test.ps1 -Path D:\<share folder> -Label server-local -DefenderAB`.
+3. On the server: `.\SmallFile-Test.ps1 -Path \\<server>\<share> -Label server-loopback`.
+4. On the host: `./pve-audit.sh 102` (now also reports NIC drops/errors, offloads, firewall, conntrack).
+
+How to read it: `server-local` at well under 1 ms per file means storage, NTFS and the zvol are fine. `server-loopback` several times slower means the SMB stack (signing, share settings, Defender scanning on open). If both are fast, Sunday's `lan-client` run (and `old-server-lan` against the old bare-metal share from the same PC) will show the network path.
+
 ## 3. Prep before Sunday
 
 1. Copy the kit to a USB stick and your laptop. Put the extracted `DiskSpd.zip` (github.com/microsoft/diskspd/releases) into `windows/tools/`.
@@ -99,6 +110,8 @@ zfs list -t snapshot -o name,creation -s creation -r StoragePool | tail
 | server-local | `.\SmallFile-Test.ps1 -Path D:\Share -Label server-local -DefenderAB` |
 | server-loopback | `.\SmallFile-Test.ps1 -Path \\<server>\Share -Label server-loopback` |
 | lan-client (office PC) | `.\SmallFile-Test.ps1 -Path \\<server>\Share -Label lan-client -Mode ReadSeed` |
+| old-server-lan (same PC, old bare-metal share) | `.\SmallFile-Test.ps1 -Path \\<oldserver>\Share -Label old-server-lan` (reference point) |
+| lan-client-ip vs lan-client-name (same PC) | run once with `\\<IP>\Share` and once with `\\<NAME>\Share`. If DNS is broken, add `<IP> <NAME>` to that PC's `C:\Windows\System32\drivers\etc\hosts` for the test. Isolates the IP-address / security-zone / NTLM effect |
 | vpn-client (laptop on hotspot + OpenVPN) | `.\SmallFile-Test.ps1 -Path \\<server>\Share -Label vpn-client -Mode ReadSeed -RealDataPath \\<server>\Share\<engagement>` |
 | vpn-client-wg (same laptop, UniFi WireGuard) | same command with `-Label vpn-client-wg` (see 6C) |
 | Network, both locations | `.\Client-NetCheck.ps1 -Server <server> -Share <share>` |
@@ -174,7 +187,7 @@ UDP is confirmed, so TCP-over-TCP stalls are ruled out. The OpenVPN server is ma
    - The VPN server's DNS points at the DC, so AD names and Kerberos work.
    - Review IPS/threat inspection and Smart Queues on the WAN.
    - Check the office upload speed.
-   - Note the gateway model: OpenVPN is CPU-bound on smaller gateways.
+   - The gateway is a UDM-Beast (8-core ARM, 25 Gbps IPS), so gateway CPU is not the limit for 3-5 VPN users.
 
 WireGuard vs OpenVPN trade-offs:
 - WireGuard is faster and simpler, with a kernel data path.

@@ -16,12 +16,13 @@
 #>
 [CmdletBinding()]
 param(
-    [string[]]$Path = @($PSScriptRoot),
+    [string[]]$Path,
     [switch]$Redact,
     [string]$OutFile
 )
 $ErrorActionPreference = 'Continue'
 $inv = [Globalization.CultureInfo]::InvariantCulture
+if (-not $Path) { $here = $PSScriptRoot; if (-not $here) { $here = (Get-Location).Path }; $Path = @($here) }
 
 # ------------------------------------------------------------------ load
 $files = @()
@@ -198,6 +199,8 @@ if ($isUnifi) {
     Act 2 'UniFi gateway: move the 3-5 remote users from OpenVPN to the built-in WireGuard server (per-device configs; revoke lost devices)' $wgNote '1 h'
 } elseif (HasWarn 'disables DCO|topology is|CBC|legacy OpenVPN TAP|older than 2\.6|disable-dco') { Act 2 'Enable OpenVPN data channel offload: 2.6+ both ends, AES-GCM/ChaCha20, topology subnet, no compression' (WarnText 'disables DCO|topology is|CBC|legacy OpenVPN TAP|older than 2\.6|disable-dco') '1 h' }
 if (HasWarn 'No Kerberos ticket|mapped by IP|Cannot resolve|dhcp-option DNS') { Act 2 'Fix name resolution over the VPN: push the DC as DNS + domain suffix; map drives by server name' (WarnText 'No Kerberos ticket|mapped by IP|Cannot resolve|dhcp-option DNS') '30 min' }
+if (HasWarn 'security zone') { Act 1 'Stop reaching the share by IP address: fix AD DNS, then map by server name (or add the server to the Local intranet zone by GPO); A/B test \\IP vs \\NAME from one office PC first' (WarnText 'security zone') '1 h' }
+if (HasWarn 'cannot find a domain controller|does not use itself for DNS|dcdiag reported') { Act 1 'Fix AD DNS: clients use the DC as DNS (UDM DHCP option), the DC points at itself and forwards to the UDM; re-run dcdiag' (WarnText 'cannot find a domain controller|does not use itself for DNS|dcdiag reported') '1-2 h' }
 if (HasWarn 'vmgenid is NOT set') { Act 2 'Add vmgenid to the DC VM before relying on snapshot rollback (qm set <vmid> --vmgenid 1)' 'AD rollback protection' '5 min + stop/start' }
 if (HasWarn 'discard not enabled|TRIM is disabled') { Act 2 'Enable discard=on (and ssd=1) on the VM disks, then Optimize-Volume -ReTrim in Windows' (WarnText 'discard not enabled|TRIM is disabled') '10 min + reboot' }
 if (HasWarn '% full') { Act 2 'Free space on the pool (keep ZFS below ~80% full)' (WarnText '% full') 'varies' }
