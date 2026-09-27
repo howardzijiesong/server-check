@@ -17,16 +17,27 @@ param(
     [string]$Share,
     [string]$Label,          # lan / vpn (auto-detected from the route if omitted)
     [int]$PingCount = 50,
-    [string]$OutDir = (Join-Path $PSScriptRoot 'results')
+    [string]$OutDir
 )
 
 $ErrorActionPreference = 'Continue'
-$kitLib = Join-Path $PSScriptRoot 'lib\KitCommon.ps1'
+# Where the kit lives. $PSScriptRoot is empty when the code is pasted or run with ISE "Run Selection" (F8).
+$KitRoot = $PSScriptRoot
+if (-not $KitRoot -and $MyInvocation.MyCommand.Path) { $KitRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $KitRoot) {
+    $KitRoot = (Get-Location).Path
+    Write-Host "NOTE: script location unknown (pasted, or ISE F8?) - using the current folder: $KitRoot" -ForegroundColor Yellow
+    Write-Host "      Best: cd into the kit folder and run it as a file:  powershell -ExecutionPolicy Bypass -File .\<script>.ps1 ..." -ForegroundColor Yellow
+}
+if (-not $OutDir) { $OutDir = Join-Path $KitRoot 'results' }
+$kitLib = Join-Path $KitRoot 'lib\KitCommon.ps1'
 if (-not (Test-Path -LiteralPath $kitLib)) { Write-Host "ERROR: $kitLib is missing - copy the whole 'windows' folder of the kit, not single scripts." -ForegroundColor Red; exit 2 }
 . $kitLib
 Initialize-KitLog 'Client-NetCheck' $OutDir $PSBoundParameters
 $report = $script:KitLog
 Start-Transcript -Path $report | Out-Null
+# Read-only audit: log any unexpected error with a hint and carry on with the next step.
+# (No try/finally around the body: 'continue' in a trap does not resume inside a try block.)
 trap { Write-KitError "Step failed: $($_.Exception.Message)" '' $_; continue }
 $script:NcLabel = $Label
 function NcMetric([string]$Key, $Value, [string]$Unit = '') { Write-KitRecord 'METRIC' "netcheck/$($script:NcLabel)" $Key '' $Value $Unit }
@@ -83,14 +94,13 @@ function Measure-TcpConnect([string]$Target, [int]$Port, [int]$Count) {
     [pscustomobject]@{ Port = $Port; Attempts = $Count; Failed = $fail; AvgConnectMs = $avg }
 }
 
-try {
 # ------------------------------------------------------------------ CLIENT
 Section 'CLIENT'
 $os = Get-CimInstance Win32_OperatingSystem
 $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 Write-Host ("{0} {1} (build {2}.{3})   computer {4}   user {5}\{6}" -f $os.Caption, $cv.DisplayVersion, $os.BuildNumber, $cv.UBR, $env:COMPUTERNAME, $env:USERDOMAIN, $env:USERNAME)
 if ([int]$os.BuildNumber -ge 26100) { Write-Host 'Windows 11 24H2 or later: SMB signing is required on all outbound connections by default.' }
-$elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$elevated = Test-KitAdmin
 if ($elevated) { Write-Host 'NOTE: running elevated - mapped drives of the normal user session may not be visible.' -ForegroundColor Yellow }
 
 # ------------------------------------------------------------------ NAME + ROUTE
@@ -198,6 +208,38 @@ try {
     } else { Write-Host 'No SMB connection to the server in this session (use -Share, or open the share first).' }
 } catch { Write-Host "Get-SmbConnection failed (try an elevated prompt for this part): $($_.Exception.Message)" }
 
+# Security zone of the share path. \\IP paths (anything with dots) fall into the Internet zone by
+# default, so Windows applies Internet-zone rules (security prompts, SmartScreen / Protected View,
+# restrictions on code loaded from the share). Dotless names like \\FS01 are Local intranet.
+$zonePath = "\\$Server\$(if ($Share) { $Share } else { 'x' })"
+$zone = 'unknown'
+try {
+    $zt = 'System.Security.Policy.Zone' -as [type]
+    if ($zt) { $zone = [string]$zt::CreateFromUrl('file:' + $zonePath.Replace('\', '/')).SecurityZone }
+} catch { }
+if (-not $zone -or $zone -eq 'NoZone') { $zone = 'unknown (run in Windows PowerShell 5.1 for this check)' }
+Write-Host ("Security zone of {0}: {1}" -f $zonePath, $zone)
+NcFact share_zone $zone
+if ($zone -in 'Internet', 'Untrusted') {
+    Add-Finding 'WARN' ("The share path {0} is in the {1} security zone (typical when mapped by IP address). Windows applies Internet-zone rules to files and programs opened from it, which can add checks and prompts. Test: compare SmallFile-Test and a CaseWare open via \\IP vs \\NAME. Fix: map by server name once DNS works, or add the server to the Local intranet zone with the GPO 'Site to Zone Assignment List'." -f $zonePath, $zone)
+}
+
+# Can this PC find a domain controller through DNS? ("wonky" AD DNS = NTLM fallback, slow logons/GPOs)
+$adDom = $env:USERDNSDOMAIN
+if ($adDom) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $dcOk = $false
+    try { $null = Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.$adDom" -Type SRV -ErrorAction Stop; $dcOk = $true } catch { }
+    $sw.Stop()
+    NcFact dc_srv_found $dcOk; NcMetric dc_srv_lookup_ms ([math]::Round($sw.Elapsed.TotalMilliseconds, 0)) ms
+    $dnsUsed = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses } | ForEach-Object { $_.ServerAddresses }) | Select-Object -Unique
+    Write-Host ("AD domain {0}: DC SRV record {1} in {2:N0} ms; DNS servers used: {3}" -f $adDom, $(if ($dcOk) { 'found' } else { 'NOT found' }), $sw.Elapsed.TotalMilliseconds, ($dnsUsed -join ', '))
+    NcFact dns_servers ($dnsUsed -join ', ')
+    if (-not $dcOk) { Add-Finding 'WARN' "This PC cannot find a domain controller for $adDom in DNS (no _ldap._tcp.dc._msdcs SRV record via $($dnsUsed -join ', ')). Domain PCs must use the DC as their DNS server (DHCP option on the UDM), with the UDM or public DNS only as the DC's forwarder. Otherwise: NTLM instead of Kerberos, slow logons and Group Policy, and names that 'don't work' so people fall back to IP addresses." }
+} else {
+    Write-Host 'Not logged on with a domain account (USERDNSDOMAIN empty) - AD DNS check skipped.'
+}
+
 $short = $Server.Split('.')[0]
 $kl = (klist 2>&1) -join "`n"
 NcFact kerberos_ticket ([bool]($kl -match ("cifs/" + [regex]::Escape($short))))
@@ -252,8 +294,6 @@ foreach ($lvl in 'WARN', 'INFO') {
     }
 }
 if ($Findings.Count -eq 0) { Write-Host 'No findings.' }
-} finally {
-    Complete-KitLog
-    try { Stop-Transcript | Out-Null } catch { }
-    Write-Host "Report saved: $report"
-}
+Complete-KitLog
+try { Stop-Transcript | Out-Null } catch { }
+Write-Host "Report saved: $report"

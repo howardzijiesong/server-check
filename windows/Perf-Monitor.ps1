@@ -24,10 +24,19 @@ param(
     [int]$IntervalSeconds = 2,
     [string]$Label,          # e.g. lan / vpn - which situation you recorded
     [string]$Summarize,
-    [string]$OutDir = (Join-Path $PSScriptRoot 'results')
+    [string]$OutDir
 )
 $ErrorActionPreference = 'Continue'
-$kitLib = Join-Path $PSScriptRoot 'lib\KitCommon.ps1'
+# Where the kit lives. $PSScriptRoot is empty when the code is pasted or run with ISE "Run Selection" (F8).
+$KitRoot = $PSScriptRoot
+if (-not $KitRoot -and $MyInvocation.MyCommand.Path) { $KitRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $KitRoot) {
+    $KitRoot = (Get-Location).Path
+    Write-Host "NOTE: script location unknown (pasted, or ISE F8?) - using the current folder: $KitRoot" -ForegroundColor Yellow
+    Write-Host "      Best: cd into the kit folder and run it as a file:  powershell -ExecutionPolicy Bypass -File .\<script>.ps1 ..." -ForegroundColor Yellow
+}
+if (-not $OutDir) { $OutDir = Join-Path $KitRoot 'results' }
+$kitLib = Join-Path $KitRoot 'lib\KitCommon.ps1'
 if (-not (Test-Path -LiteralPath $kitLib)) { Write-Host "ERROR: $kitLib is missing - copy the whole 'windows' folder of the kit, not single scripts." -ForegroundColor Red; exit 2 }
 . $kitLib
 Initialize-KitLog 'Perf-Monitor' $OutDir $PSBoundParameters
@@ -124,7 +133,10 @@ if ($Summarize) {
     return
 }
 Assert-KitAdmin
-if ($PSVersionTable.PSEdition -eq 'Core') { Write-KitError 'Running in PowerShell 7: collection works, but the summary needs Windows PowerShell 5.1.' 'Start it with powershell.exe (not pwsh), or later run: powershell -File .\Perf-Monitor.ps1 -Summarize <file.blg>' }
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    Write-Host 'NOTE: PowerShell 7 - collection works, but the summary needs Windows PowerShell 5.1: afterwards run  powershell -File .\Perf-Monitor.ps1 -Summarize <file.blg>' -ForegroundColor Yellow
+    Write-KitRecord 'INFO' $script:PerfCat 'ps7' 'Collected under PowerShell 7; summarize the .blg with Windows PowerShell 5.1 (-Summarize).'
+}
 
 $common = @('\Processor(_Total)\% Processor Time', '\Processor(_Total)\% Privileged Time', '\System\Processor Queue Length',
     '\Memory\Available MBytes', '\Network Interface(*)\Bytes Total/sec', '\TCPv4\Segments Sent/sec', '\TCPv4\Segments Retransmitted/sec')
@@ -144,7 +156,7 @@ $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
 $name = "BottleneckKit_$Role"
 $null = & logman stop $name 2>&1
 $null = & logman delete $name 2>&1
-$cfg = Join-Path $env:TEMP "$name-counters.txt"
+$cfg = Join-Path ([System.IO.Path]::GetTempPath()) "$name-counters.txt"
 Set-Content -Path $cfg -Value $counters -Encoding ASCII
 $base = Join-Path $OutDir ("perf-{0}-{1}-{2}" -f $Role.ToLower(), $env:COMPUTERNAME, $ts)
 $out = & logman create counter $name -cf $cfg -si $IntervalSeconds -f bin -o $base -ow 2>&1

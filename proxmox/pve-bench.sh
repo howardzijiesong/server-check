@@ -216,7 +216,7 @@ prefill() { # target
   else echo "FAILED"; kit_error "prefill of $1 failed" "$(kit_fio_hint "$RAW/prefill.err")"; fi
 }
 
-core_tests() { # prefix target [extra: 1 = also SYNCOFF via dataset $3]
+core_tests() { # <label prefix> <target device>: the four tests every layer gets
   local pfx=$1 tgt=$2
   run_test "$pfx-randread-4k-qd1"        "$tgt" --size="$SIZE" --rw=randread  --bs=4k --iodepth=1 --numjobs=1
   run_test "$pfx-randwrite-4k-qd1-sync"  "$tgt" --size="$SIZE" --rw=randwrite --bs=4k --iodepth=1 --numjobs=1 --sync=1
@@ -263,8 +263,11 @@ if [[ $MODE == device ]]; then
     fi
     if (( KEEP )); then
       pool_free=$(zfs get -Hp -o value available zzbench)
-      winsize=$(( pool_free * 7 / 10 / 1073741824 ))G
-      if make_zvol zzbench/winvol "$PRIMARY" all "$winsize"; then
+      winsize_g=$(( pool_free * 7 / 10 / 1073741824 ))
+      if (( winsize_g < 8 )); then
+        kit_error "test SSD too small for a Windows-side zvol (${winsize_g} GiB free)" "DiskBench needs ~5 GB; use a bigger SSD or skip -K"
+      elif make_zvol zzbench/winvol "$PRIMARY" all "${winsize_g}G"; then
+        winsize="${winsize_g}G"
         zfs set sync=standard zzbench/winvol
         echo
         echo "Kept pool zzbench with zvol zzbench/winvol ($winsize) for a Windows-side test:"

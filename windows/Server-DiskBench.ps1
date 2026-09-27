@@ -29,11 +29,20 @@ param(
     [int]$FileSizeGB = 4,
     [switch]$Quick,
     [switch]$KeepTestFile,
-    [string]$OutDir = (Join-Path $PSScriptRoot 'results')
+    [string]$OutDir
 )
 
 $ErrorActionPreference = 'Continue'   # native-exe stderr + 'Stop' is fatal in Windows PowerShell 5.1
-$kitLib = Join-Path $PSScriptRoot 'lib\KitCommon.ps1'
+# Where the kit lives. $PSScriptRoot is empty when the code is pasted or run with ISE "Run Selection" (F8).
+$KitRoot = $PSScriptRoot
+if (-not $KitRoot -and $MyInvocation.MyCommand.Path) { $KitRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $KitRoot) {
+    $KitRoot = (Get-Location).Path
+    Write-Host "NOTE: script location unknown (pasted, or ISE F8?) - using the current folder: $KitRoot" -ForegroundColor Yellow
+    Write-Host "      Best: cd into the kit folder and run it as a file:  powershell -ExecutionPolicy Bypass -File .\<script>.ps1 ..." -ForegroundColor Yellow
+}
+if (-not $OutDir) { $OutDir = Join-Path $KitRoot 'results' }
+$kitLib = Join-Path $KitRoot 'lib\KitCommon.ps1'
 if (-not (Test-Path -LiteralPath $kitLib)) { Write-Host "ERROR: $kitLib is missing - copy the whole 'windows' folder of the kit, not single scripts." -ForegroundColor Red; exit 2 }
 . $kitLib
 Initialize-KitLog 'Server-DiskBench' $OutDir $PSBoundParameters
@@ -41,7 +50,7 @@ Assert-KitAdmin
 
 function Find-DiskSpd {
     if ($DiskSpdPath -and (Test-Path -LiteralPath $DiskSpdPath)) { return (Resolve-Path -LiteralPath $DiskSpdPath).ProviderPath }
-    $all = @(Get-ChildItem -Path $PSScriptRoot -Recurse -Filter 'diskspd.exe' -ErrorAction SilentlyContinue)
+    $all = @(Get-ChildItem -Path $KitRoot -Recurse -Filter 'diskspd.exe' -ErrorAction SilentlyContinue)
     $pick = $all | Where-Object { $_.FullName -match '\\amd64\\' } | Select-Object -First 1
     if (-not $pick) { $pick = $all | Select-Object -First 1 }
     if ($pick) { return $pick.FullName }
@@ -67,7 +76,7 @@ Write-Host "Using $diskspd"
 
 New-Item -ItemType Directory -Path $TestPath -Force | Out-Null
 $drive = (Get-Item -LiteralPath $TestPath).PSDrive.Name
-$vol = Get-Volume -DriveLetter $drive -ErrorAction Stop
+$vol = Get-Volume -DriveLetter $drive -ErrorAction Stop | Select-Object -First 1
 if (-not $Label) { $Label = "vm-$drive" }
 $script:KitCat = "diskbench/$Label"
 Write-KitFact label $Label; Write-KitFact test_path $TestPath; Write-KitFact volume ("{0}: {1} {2:N0} GB free" -f $drive, $vol.FileSystemType, ($vol.SizeRemaining / 1GB))
